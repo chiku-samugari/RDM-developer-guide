@@ -42,7 +42,7 @@
   $ sudo ifconfig lo:0 192.168.168.167 netmask 255.255.255.255 up
   ```
 
-以降で追加する設定は、いずれもリポジトリにコミットされない**上書き用ファイル**(`docker-compose.override.yml`, `.docker-compose.local.env`, `config.json`, `Caddyfile` など)に記述します。追跡対象のファイルは upstream の値のまま変更しません。
+以降で追加する設定は、新規ユーザの登録に関するスイッチの既定値を指定するために編集する`features.yaml`以外はリポジトリにコミットされない**上書き用ファイル**(`docker-compose.override.yml`, `.docker-compose.local.env`, `config.json`, `Caddyfile` など)に記述します。追跡対象のファイルは upstream の値のまま変更しません。
 
 ## osf.io の準備と起動
 
@@ -96,7 +96,13 @@ $ docker compose run --rm web python3 manage.py migrate
 $ docker compose up -d assets fakecas worker web api
 ```
 
-なお、管理者機能が必要な場合には、`admin`と`admin_assets`を追加して起動してください。
+新規ユーザの登録を行なう場合は `mailhog` が必要な場合があるので、これを追加して起動します。これについて詳細は[「新規ユーザの登録とメール確認」](#新規ユーザの登録とメール確認)を参照してください。。
+
+```bash
+$ docker compose up -d assets fakecas worker web api mailhog
+```
+
+また、管理者機能が必要な場合には、`admin`と`admin_assets`を追加して起動してください。
 
 ```bash
 $ docker compose up -d assets fakecas worker web api admin_assets admin
@@ -222,7 +228,7 @@ $ npm install
 }
 ```
 
-開発サーバは**`development`**構成で起動します(i.e. `src/environments/environment.development.ts`)。
+開発サーバは **`development`** 構成で起動します(i.e. `src/environments/environment.development.ts`)。
 
 ```bash
 $ npx ng serve --configuration development --host 0.0.0.0 --port 4200 --poll 2000
@@ -255,8 +261,8 @@ http://localhost {
 	@gvicons path /static/provider_icons/* /static/*/icons/*
 	handle @gvicons { reverse_proxy 127.0.0.1:8004 }
 
-	# osf.io web + CAS (Flask, :5000)
-	@flask path /login /login/* /logout /logout/* /oauth /oauth/* /api/v1 /api/v1/* /download /download/*
+	# osf.io web + CAS (Flask, :5000) — /confirm は新規ユーザのメール確認リンク(後述)
+	@flask path /login /login/* /logout /logout/* /oauth /oauth/* /api/v1 /api/v1/* /download /download/* /confirm /confirm/*
 	handle @flask { reverse_proxy 127.0.0.1:5000 }
 
 	# angular-osf の開発サーバ (:4200) — Host は "localhost" のまま(localhost:4200 に書き換えない)
@@ -272,18 +278,18 @@ $ docker run -d --name osf-proxy --restart unless-stopped --network host -v "$PW
 
 ## 起動手順のまとめ
 
-起動の順序は ** エイリアス -> バックエンド -> フロントエンド -> プロキシ ** です。
+ここまでに述べた内容は、開発環境を初めて構成するときに必要な初期化を含んでおり、手順の多くは初めて構成するときにのみ必要なものです。そのような手順を省くと以下の通りになります。初回以外はこの手順により開発環境を立ち上げることができます。
 
 ```bash
 # 0) ループバックエイリアス
 $ sudo ifconfig lo:0 192.168.168.167 netmask 255.255.255.255 up
 
 # 1) バックエンド
-$ cd /path/to/osf.io       && docker compose up -d assets fakecas worker web api
+$ cd /path/to/osf.io       && docker compose up -d assets fakecas worker web api # mailhog, admin, admin_assetsは必要に応じて追加
 $ cd /path/to/gravyvalet   && docker compose up -d
 $ cd /path/to/waterbutler  && docker compose up -d
 
-# 2) angular-osf の開発サーバ(別ターミナル。コンパイルに十数秒かかる)
+# 2) angular-osf の開発サーバ(別ターミナルで起動、コンパイルに十数秒かかる)
 $ cd /path/to/angular-osf
 $ npx ng serve --configuration development --host 0.0.0.0 --port 4200 --poll 2000
 
@@ -301,6 +307,62 @@ $ docker start osf-proxy        # 初回は「単一オリジンプロキシ」�
 ```bash
 $ curl -s -o /dev/null -w '%{http_code}\n' http://localhost/            # 200 (angular-osf)
 $ curl -s -o /dev/null -w '%{http_code}\n' http://localhost/v2/         # 200 (API)
+```
+
+## 新規ユーザの登録とメール確認
+
+以前からosf.ioを利用してローカルに開発環境を整備していて、既にユーザを登録済みの場合、そのような既存ユーザは fakecas 経由で引き続きサインインできます。しかし、現在のosf.ioで **新規にユーザを登録** するには、確認メールの仕組みに追加の準備が必要です。osf.io の通知(Notification)基盤が刷新され確認メールの送信経路が変わったため、ローカル環境では以下の3点を揃える必要があります。
+
+### MailHog と `enable_mailhog` スイッチ
+
+確認メールは ローカル用のダミーSMTPサーバであるMailHog で受け取ります。加えて `enable_mailhog` の waffle スイッチを有効化します。これが無効(既定)のままだと送信は SendGrid 経路となり、ローカルにはAPIキーがないため送信時に例外が発生します。この例外により登録リクエストのトランザクションがロールバックされ、 **未確認ユーザ自体が作成されません** 。
+
+`osf/features.yaml` の該当スイッチ(`enable_mailhog`)を `active: true` に変更し、以下で反映します。
+
+```bash
+$ docker compose run --rm web python3 manage.py manage_switch_flags
+```
+
+> `manage.py waffle_switch enable_mailhog on` でも一時的に有効化できますが、`migrate` のたびに `features.yaml` の値(既定は無効)にリセットされます。
+
+以上を実施した後、ブラウザで`http://localhost`にアクセスして "Sign Up" ボタンから新規ユーザの登録を実行できます。ただし、登録確認のためにアクセスするURLは `web` コンテナのログから探し出してアクセスする必要があります。`web` コンテナのログから最新の確認URLだけを取り出すには次のようにします。
+
+```bash
+$ docker compose logs web | grep -oE 'http://localhost/confirm/[A-Za-z0-9]+/[A-Za-z0-9]+/' | tail -1
+```
+
+一般的なユーザ登録の流れでは、ユーザが登録時に提出したメールアドレスにこの確認用URLを含むメールが送信され、ユーザはこのURLを入手することになります。このためのメール本文を生成し、メールを確認するためには[次節](#通知テンプレートの投入)を実施してください。
+
+### 通知テンプレートの投入
+
+ユーザ登録確認メールの件名と本文は DBの `NotificationType` レコードのテンプレートから生成されますが、新規のDBではテンプレートが空のため、 **本文が空・件名が `None`** のメールになります。以下のコマンドで、`notifications.yaml` と各テンプレートファイルから内容をDBに投入します。
+
+```bash
+$ docker compose run --rm web python3 manage.py populate_notification_types
+```
+
+> **2時間キャッシュに注意。** `NotificationType` はアプリのプロセス内で最大2時間キャッシュされます(`ttl_cached_property`)。確認メールは web プロセス内で同期的に送信されるため、テンプレート投入前に一度でも確認メールを送っていると、投入後もしばらく空メールが送られ続けます。投入後はアプリのコンテナを再起動してキャッシュを破棄してください(初回登録より前に投入を済ませていれば再起動は不要です)。
+
+```bash
+$ docker compose restart web api worker   # osf.io ディレクトリで実行
+```
+
+> `features.yaml` の `populate_notification_types` スイッチは `migrate` 時の**自動投入**(`post_migrate` フック)を制御するもので、上記のようにコマンドを直接実行する場合は変更不要です。投入されるのは `NotificationType` の **データ(行)** であり、waffle スイッチの状態とは異なり `migrate` で消えることはありません(一度投入すれば維持されます)。一方、前掲の `enable_mailhog` は送信のたびに参照される実行時スイッチであり、`migrate` で `features.yaml` の値に戻ります。したがって、`migrate `のたびに`enable_mailhog` を `true` にする手順を実施するか、`features.yaml` を変更して既定値を `true` にしておくことが必要になります。
+
+### Caddy の `/confirm` ルート
+
+確認メールのリンク `http://localhost/confirm/<uid>/<token>/` は osf.io(Flask, :5000)が処理するルートです。「[Caddyを用いた単一オリジンプロキシの起動](#caddyを用いた単一オリジンプロキシの起動)」の `Caddyfile` では、この `/confirm` を `@flask` に含めています。含めないと angular-osf(SPA)側に振り分けられ、`/v2/guids/confirm/` として解決されようとして 404 になります。
+
+### 動作確認
+
+1. ブラウザで **http://localhost/** を開き、サインアップします。
+2. MailHogのWeb UI **http://localhost:8025** を開くと、件名 **「OSF Account Verification」** のメールが届いています。本文には確認URLが含まれているので、そのURLを開きます。
+3. Flask がメール確認を完了し、CAS(検証キー)によるログインを経てダッシュボードに遷移すれば成功です。
+
+確認URLは、MailHog の Web UI のほか、`mailhog` コンテナのログからも取得できます(ログを追う運用に慣れている場合に便利です)。MailHog は受信したメール本文をログに出力するため、「[通知テンプレートの投入](#通知テンプレートの投入)」を済ませて本文が生成されていれば、以下のように最新の確認URLを取り出せます。
+
+```bash
+$ docker compose logs mailhog | grep -oE 'http://localhost/confirm/[A-Za-z0-9]+/[A-Za-z0-9]+/' | tail -1
 ```
 
 以上で開発環境の準備は完了です。
